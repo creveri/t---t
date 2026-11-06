@@ -1,0 +1,531 @@
+<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><style>html,body{margin:0}</style></head><body>
+<title>كائن اليد</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Readex+Pro:wght@400;500;600&family=Reem+Kufi:wght@600&display=swap" rel="stylesheet">
+<style>
+/* Layout: a full-bleed night-water canvas; title and status float top, a control dock sits at the bottom. */
+*{box-sizing:border-box}
+:root{
+  --bg:#06121a;
+  --bg-2:#0f3a4b;
+  --ink:#e9f2ef;
+  --muted:#93adb0;
+  --accent:#ff8a4c;
+  --accent-ink:#1d0d04;
+  --panel:rgba(7,20,28,.78);
+  --line:rgba(233,242,239,.16);
+  --font-ui:"Readex Pro",system-ui,"Segoe UI",Tahoma,sans-serif;
+  --font-display:"Reem Kufi","Readex Pro",system-ui,"Segoe UI",Tahoma,sans-serif;
+  color-scheme:dark;
+}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--font-ui);overflow:hidden;-webkit-tap-highlight-color:transparent}
+.app{position:fixed;inset:0;background:var(--bg)}
+#stage{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none;user-select:none;-webkit-user-select:none;cursor:crosshair}
+.top{position:absolute;top:env(safe-area-inset-top,0px);left:0;right:0;display:flex;justify-content:space-between;align-items:flex-start;gap:12px;padding:14px max(16px,env(safe-area-inset-left,0px)) 0 max(16px,env(safe-area-inset-right,0px));pointer-events:none}
+.titleblock{min-width:0}
+h1{margin:0;font-family:var(--font-display);font-size:24px;font-weight:600;line-height:1.2;color:var(--ink)}
+#status{margin:6px 0 0;font-size:13px;line-height:1.7;color:var(--muted);max-width:min(280px,62vw)}
+.cam{flex:none;width:96px;aspect-ratio:4/3;max-width:100%;border-radius:12px;overflow:hidden;border:1px solid var(--line);background:#000}
+.cam video{display:block;width:100%;height:100%;object-fit:cover;transform:scaleX(-1)}
+.dock{position:absolute;left:0;right:0;bottom:env(safe-area-inset-bottom,0px);padding:0 max(16px,env(safe-area-inset-left,0px)) 14px max(16px,env(safe-area-inset-right,0px));display:flex;justify-content:center;pointer-events:none}
+.panel{pointer-events:auto;width:100%;max-width:520px;background:var(--panel);-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);border:1px solid var(--line);border-radius:18px;padding:12px;display:grid;gap:10px}
+.seg{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:6px}
+.chip{min-width:0;min-height:44px;padding:8px;border-radius:12px;border:1px solid var(--line);background:transparent;color:var(--ink);font:inherit;font-size:14px;cursor:pointer}
+.chip[aria-pressed="true"]{background:var(--ink);color:var(--bg);border-color:var(--ink);font-weight:600}
+.cta{min-height:46px;border:0;border-radius:12px;background:var(--accent);color:var(--accent-ink);font:inherit;font-size:15px;font-weight:600;cursor:pointer}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+</style>
+<div class="app" dir="rtl" lang="ar">
+  <canvas id="stage" aria-label="مساحة اللعب: الكائن يتحرك مع يدك"></canvas>
+  <header class="top">
+    <div class="titleblock">
+      <h1>كائن اليد</h1>
+      <p id="status" role="status" aria-live="polite"></p>
+    </div>
+    <div class="cam" id="camBox" hidden><video id="cam" playsinline muted></video></div>
+  </header>
+  <div class="dock">
+    <section class="panel" id="panel" aria-label="الإعدادات">
+      <div class="seg" role="group" aria-label="الكائن">
+        <button class="chip" type="button" data-kind="orb" aria-pressed="false">كرة طاقة</button>
+        <button class="chip" type="button" data-kind="fish" aria-pressed="true">سمكة</button>
+        <button class="chip" type="button" data-kind="snake" aria-pressed="false">ثعبان</button>
+      </div>
+      <div class="seg" role="group" aria-label="السلوك">
+        <button class="chip" type="button" data-mode="follow" aria-pressed="true">يتبع يدك</button>
+        <button class="chip" type="button" data-mode="flee" aria-pressed="false">يهرب من يدك</button>
+      </div>
+      <button class="cta" id="camBtn" type="button">شغّل الكاميرا</button>
+    </section>
+  </div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
+<script>
+(function () {
+'use strict';
+var $ = function (id) { return document.getElementById(id); };
+var cv = $('stage'), ctx = cv.getContext('2d');
+var statusEl = $('status'), video = $('cam'), camBox = $('camBox'), camBtn = $('camBtn'), panel = $('panel');
+var calm = !!(window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches);
+var TAU = Math.PI * 2;
+
+var W = 0, H = 0, DPR = 1, S = 1, floorY = 0, bgGrad = null;
+var kind = 'fish', mode = 'follow';
+var GAP = { orb: 0, fish: 13, snake: 11 };
+var COUNT = { orb: 1, fish: 20, snake: 30 };
+var FLEE_R = 360;
+var head = { x: 0, y: 0, vx: 0, vy: 0, a: Math.random() * TAU };
+var spine = [];
+var tgt = { x: 0, y: 0, has: false, src: 'none', seen: 0 };
+var fleeing = false, fleeSide = 1, flipCool = 0, wanderA = Math.random() * TAU;
+var phase = 0, clock = 0, rippleT = 0;
+var ripples = [], parts = [];
+
+/* ---------- layout ---------- */
+function measureFloor() {
+  var pr = panel.getBoundingClientRect();
+  floorY = Math.max(H * 0.5, Math.min(H - 24, pr.top - 18));
+  if (head.y > floorY) head.y = floorY;
+}
+function resize() {
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  W = cv.clientWidth; H = cv.clientHeight;
+  cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  S = Math.max(0.7, Math.min(1.25, Math.min(W, H) / 620));
+  bgGrad = ctx.createRadialGradient(W * 0.5, H * 0.4, 10, W * 0.5, H * 0.5, Math.max(W, H) * 0.75);
+  bgGrad.addColorStop(0, '#0f3a4b');
+  bgGrad.addColorStop(1, '#050e15');
+  if (!head.x) { head.x = W / 2; head.y = H * 0.4; }
+  head.x = Math.max(24, Math.min(W - 24, head.x));
+  measureFloor();
+  resetSpine();
+  paintBg();
+}
+function paintBg() {
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = bgGrad;
+  ctx.fillRect(0, 0, W, H);
+}
+function resetSpine() {
+  var n = COUNT[kind], g = GAP[kind] * S;
+  spine = [];
+  for (var i = 0; i < n; i++) {
+    spine.push({ x: head.x - Math.cos(head.a) * g * i, y: head.y - Math.sin(head.a) * g * i });
+  }
+}
+
+/* ---------- target (hand or finger) ---------- */
+function setTarget(x, y, src) {
+  if (!tgt.has) { tgt.x = x; tgt.y = y; }
+  else { tgt.x += (x - tgt.x) * 0.4; tgt.y += (y - tgt.y) * 0.4; }
+  tgt.has = true; tgt.src = src; tgt.seen = performance.now();
+}
+function handActive() { return tgt.src === 'hand' && tgt.has; }
+function ptr(e) {
+  var r = cv.getBoundingClientRect();
+  setTarget(e.clientX - r.left, e.clientY - r.top, 'pointer');
+}
+cv.addEventListener('pointerdown', function (e) {
+  if (handActive()) return;
+  try { cv.setPointerCapture(e.pointerId); } catch (err) {}
+  ptr(e);
+});
+cv.addEventListener('pointermove', function (e) {
+  if (handActive()) return;
+  if (e.pointerType === 'mouse' || e.buttons) ptr(e);
+});
+function release(e) {
+  if (e.pointerType !== 'mouse' && tgt.src === 'pointer') tgt.has = false;
+}
+cv.addEventListener('pointerup', release);
+cv.addEventListener('pointercancel', release);
+cv.addEventListener('pointerleave', function (e) {
+  if (e.pointerType === 'mouse' && tgt.src === 'pointer') tgt.has = false;
+});
+
+/* ---------- movement ---------- */
+function drift(maxSp, dt) {
+  wanderA += (Math.random() - 0.5) * dt * 5;
+  var sp = maxSp * 0.26;
+  return [Math.cos(wanderA) * sp, Math.sin(wanderA) * sp];
+}
+function update(dt) {
+  clock += dt; flipCool -= dt;
+  var maxSp = kind === 'orb' ? 560 : kind === 'fish' ? 430 : 380;
+  var now = performance.now();
+  if (tgt.src === 'hand' && tgt.has && now - tgt.seen > 400) tgt.has = false;
+  var dx = 0, dy = 0, wall = true, v;
+  if (tgt.has) {
+    var vx = tgt.x - head.x, vy = tgt.y - head.y;
+    var d = Math.hypot(vx, vy) || 1, ux = vx / d, uy = vy / d;
+    if (mode === 'follow') {
+      fleeing = false; wall = false;
+      var sp0 = Math.min(maxSp, d * 3.2);
+      dx = ux * sp0; dy = uy * sp0;
+      var near = 70 * S;
+      if (d < near) { var kk = 1 - d / near; dx += -uy * maxSp * 0.4 * kk; dy += ux * maxSp * 0.4 * kk; }
+    } else {
+      var R = FLEE_R * S;
+      if (d < R) {
+        if (!fleeing) { fleeing = true; fleeSide = Math.random() < 0.5 ? -1 : 1; }
+        var k = 1 - d / R, sp1 = maxSp * (0.4 + 0.6 * k);
+        dx = (-ux - uy * 0.55 * fleeSide) * sp1;
+        dy = (-uy + ux * 0.55 * fleeSide) * sp1;
+      } else { fleeing = false; v = drift(maxSp, dt); dx = v[0]; dy = v[1]; }
+    }
+  } else { fleeing = false; v = drift(maxSp, dt); dx = v[0]; dy = v[1]; }
+
+  if (wall) {
+    var m = 110 * S, f = maxSp * 0.9;
+    if (head.x < m) dx += (m - head.x) / m * f; else if (head.x > W - m) dx -= (head.x - (W - m)) / m * f;
+    if (head.y < m) dy += (m - head.y) / m * f; else if (head.y > floorY - m) dy -= (head.y - (floorY - m)) / m * f;
+  }
+
+  var ease = Math.min(1, dt * 4.2);
+  head.vx += (dx - head.vx) * ease;
+  head.vy += (dy - head.vy) * ease;
+  head.x += head.vx * dt; head.y += head.vy * dt;
+  var hit = false;
+  if (head.x < 24) { head.x = 24; hit = true; } else if (head.x > W - 24) { head.x = W - 24; hit = true; }
+  if (head.y < 24) { head.y = 24; hit = true; } else if (head.y > floorY) { head.y = floorY; hit = true; }
+  if (hit && fleeing && flipCool <= 0) { fleeSide *= -1; flipCool = 0.8; }
+
+  var sp = Math.hypot(head.vx, head.vy);
+  if (sp > 18) {
+    var da = Math.atan2(head.vy, head.vx) - head.a;
+    da = Math.atan2(Math.sin(da), Math.cos(da));
+    head.a += da * Math.min(1, dt * 7);
+  }
+  phase += dt * (4 + sp / 55);
+
+  if (spine.length) {
+    spine[0].x = head.x; spine[0].y = head.y;
+    var g = GAP[kind] * S;
+    for (var i = 1; i < spine.length; i++) {
+      var p = spine[i - 1], s = spine[i];
+      var ax = s.x - p.x, ay = s.y - p.y, dd = Math.hypot(ax, ay) || 1;
+      s.x = p.x + ax / dd * g; s.y = p.y + ay / dd * g;
+    }
+  }
+
+  if (!calm && sp > 90) {
+    rippleT -= dt;
+    if (rippleT <= 0) { ripples.push({ x: head.x, y: head.y, t: 0 }); rippleT = 0.14; if (ripples.length > 30) ripples.shift(); }
+  }
+  for (var j = ripples.length - 1; j >= 0; j--) { ripples[j].t += dt; if (ripples[j].t > 1.6) ripples.splice(j, 1); }
+}
+
+/* ---------- drawing helpers ---------- */
+function drawRipples() {
+  ctx.lineWidth = 1.2;
+  for (var i = 0; i < ripples.length; i++) {
+    var r = ripples[i], a = (1 - r.t / 1.6) * 0.28;
+    ctx.strokeStyle = 'rgba(150,215,225,' + a.toFixed(3) + ')';
+    ctx.beginPath(); ctx.arc(r.x, r.y, 10 + r.t * 90 * S, 0, TAU); ctx.stroke();
+  }
+}
+function curve(P) {
+  for (var i = 1; i < P.length - 1; i++) {
+    ctx.quadraticCurveTo(P[i][0], P[i][1], (P[i][0] + P[i + 1][0]) / 2, (P[i][1] + P[i + 1][1]) / 2);
+  }
+  var l = P[P.length - 1]; ctx.lineTo(l[0], l[1]);
+}
+function bodyGeom(widthFn, amp) {
+  var n = spine.length, C = [], L = [], R = [];
+  var swim = 0.35 + Math.min(1, Math.hypot(head.vx, head.vy) / 260) * 0.65;
+  for (var i = 0; i < n; i++) {
+    var a0 = spine[Math.max(0, i - 1)], a1 = spine[Math.min(n - 1, i + 1)];
+    var ang = Math.atan2(a0.y - a1.y, a0.x - a1.x);
+    var nx = -Math.sin(ang), ny = Math.cos(ang), t = i / (n - 1), w = widthFn(t);
+    var off = Math.sin(phase - i * 0.5) * amp * S * Math.pow(t, 1.2) * swim;
+    var cx = spine[i].x + nx * off, cy = spine[i].y + ny * off;
+    C.push({ x: cx, y: cy, ang: ang, w: w, nx: nx, ny: ny });
+    L.push([cx + nx * w, cy + ny * w]);
+    R.push([cx - nx * w, cy - ny * w]);
+  }
+  return { C: C, L: L, R: R };
+}
+function bodyPath(g) {
+  var C = g.C, L = g.L, R = g.R, n = C.length;
+  ctx.beginPath(); ctx.moveTo(L[0][0], L[0][1]);
+  curve(L);
+  ctx.lineTo(R[n - 1][0], R[n - 1][1]);
+  curve(R.slice().reverse());
+  var c0 = C[0];
+  ctx.quadraticCurveTo(c0.x + Math.cos(c0.ang) * c0.w * 1.9, c0.y + Math.sin(c0.ang) * c0.w * 1.9, L[0][0], L[0][1]);
+  ctx.closePath();
+}
+function shadow(g) {
+  ctx.save(); ctx.translate(10 * S, 14 * S); ctx.globalAlpha = 0.18; ctx.fillStyle = '#000';
+  bodyPath(g); ctx.fill(); ctx.restore();
+}
+
+/* ---------- orb ---------- */
+function drawOrb(dt) {
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.fillStyle = 'rgba(5,14,21,.22)';
+  ctx.fillRect(0, 0, W, H);
+  drawRipples();
+  var sp = Math.hypot(head.vx, head.vy);
+  var h = (200 + 70 * Math.sin(clock * 0.4) + sp * 0.04) % 360;
+  var spawn = (calm ? 1 : 3) + Math.floor(sp / 160), k, i;
+  for (k = 0; k < spawn; k++) {
+    var a = Math.random() * TAU, r = Math.random() * 20 * S, sv = 30 * (0.5 + Math.random());
+    parts.push({ x: head.x + Math.cos(a) * r, y: head.y + Math.sin(a) * r,
+      vx: -head.vx * 0.25 + Math.cos(a) * sv, vy: -head.vy * 0.25 + Math.sin(a) * sv,
+      life: 0, max: 0.7 + Math.random() * 0.9, h: h + Math.random() * 50 - 25 });
+  }
+  if (parts.length > 420) parts.splice(0, parts.length - 420);
+  ctx.globalCompositeOperation = 'lighter';
+  for (i = parts.length - 1; i >= 0; i--) {
+    var p = parts[i]; p.life += dt;
+    if (p.life >= p.max) { parts.splice(i, 1); continue; }
+    p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.98; p.vy *= 0.98;
+    var t = 1 - p.life / p.max;
+    ctx.fillStyle = 'hsla(' + p.h + ',95%,62%,' + (t * 0.55).toFixed(3) + ')';
+    ctx.beginPath(); ctx.arc(p.x, p.y, (1.5 + 3.5 * t) * S, 0, TAU); ctx.fill();
+  }
+  var pulse = 1 + 0.08 * Math.sin(clock * 5), rad = 96 * S * pulse;
+  var g = ctx.createRadialGradient(head.x, head.y, 0, head.x, head.y, rad);
+  g.addColorStop(0, 'hsla(' + h + ',100%,88%,.95)');
+  g.addColorStop(0.18, 'hsla(' + h + ',95%,62%,.75)');
+  g.addColorStop(0.5, 'hsla(' + (h + 40) + ',90%,45%,.22)');
+  g.addColorStop(1, 'hsla(' + (h + 40) + ',90%,40%,0)');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(head.x, head.y, rad, 0, TAU); ctx.fill();
+  var spin = clock * (1.2 + sp / 260), ang, rr;
+  ctx.fillStyle = 'hsla(' + (h + 20) + ',100%,75%,.9)';
+  for (k = 0; k < 36; k++) {
+    ang = spin + k * TAU / 36; rr = (56 + 6 * Math.sin(clock * 3 + k * 0.7)) * S;
+    ctx.beginPath(); ctx.arc(head.x + Math.cos(ang) * rr, head.y + Math.sin(ang) * rr, 2.2 * S, 0, TAU); ctx.fill();
+  }
+  var rot = clock * 0.6, cr = Math.cos(rot), sr = Math.sin(rot);
+  ctx.fillStyle = 'hsla(' + (h - 30) + ',100%,72%,.8)';
+  for (k = 0; k < 22; k++) {
+    ang = -clock * 1.6 + k * TAU / 22;
+    var ex = Math.cos(ang) * 84 * S, ey = Math.sin(ang) * 30 * S;
+    ctx.beginPath(); ctx.arc(head.x + ex * cr - ey * sr, head.y + ex * sr + ey * cr, 1.8 * S, 0, TAU); ctx.fill();
+  }
+  ctx.globalCompositeOperation = 'source-over';
+}
+
+/* ---------- fish ---------- */
+var PATCHES = [
+  { i: 3, o: 0.2, r: 1.3, c: '#ff7a35' }, { i: 5, o: -0.3, r: 1.1, c: '#ff7a35' },
+  { i: 8, o: 0, r: 1.4, c: '#e9482b' }, { i: 11, o: 0.25, r: 1.1, c: '#ff7a35' },
+  { i: 6, o: 0.4, r: 0.5, c: '#22191a' }, { i: 14, o: -0.1, r: 1.0, c: '#ff7a35' }
+];
+function drawFish() {
+  paintBg(); drawRipples();
+  var g = bodyGeom(function (t) { return S * 17 * Math.pow(Math.sin(Math.PI * (0.12 + 0.88 * t)), 0.75) * (1 - 0.25 * t); }, 11);
+  var C = g.C, n = C.length;
+  shadow(g);
+  // tail fin
+  var e = C[n - 1], pr = C[n - 3];
+  var ta = Math.atan2(e.y - pr.y, e.x - pr.x) + Math.sin(phase - n * 0.5) * 0.5;
+  var ux = Math.cos(ta), uy = Math.sin(ta), px = -uy, py = ux;
+  function fx(a, b) { return [e.x + ux * a * S + px * b * S, e.y + uy * a * S + py * b * S]; }
+  var c, q;
+  ctx.fillStyle = 'rgba(255,170,120,.78)';
+  ctx.beginPath(); q = fx(0, 0); ctx.moveTo(q[0], q[1]);
+  c = fx(14, 28); q = fx(40, 24); ctx.quadraticCurveTo(c[0], c[1], q[0], q[1]);
+  c = fx(30, 8); q = fx(27, 0); ctx.quadraticCurveTo(c[0], c[1], q[0], q[1]);
+  c = fx(30, -8); q = fx(40, -24); ctx.quadraticCurveTo(c[0], c[1], q[0], q[1]);
+  c = fx(14, -28); q = fx(0, 0); ctx.quadraticCurveTo(c[0], c[1], q[0], q[1]);
+  ctx.fill();
+  // pectoral fins
+  var c4 = C[4];
+  [1, -1].forEach(function (s) {
+    ctx.save();
+    ctx.translate(c4.x + c4.nx * (c4.w - 1) * s, c4.y + c4.ny * (c4.w - 1) * s);
+    ctx.rotate(c4.ang + Math.PI - s * (0.7 + Math.sin(phase * 1.2 + (s > 0 ? 0 : 1.5)) * 0.25));
+    ctx.fillStyle = 'rgba(255,205,165,.7)';
+    ctx.beginPath(); ctx.ellipse(10 * S, 0, 14 * S, 5 * S, 0, 0, TAU); ctx.fill();
+    ctx.restore();
+  });
+  // body
+  bodyPath(g); ctx.fillStyle = '#f6ecdd'; ctx.fill();
+  ctx.save(); bodyPath(g); ctx.clip();
+  PATCHES.forEach(function (p) {
+    var cc = C[p.i]; if (!cc) return;
+    ctx.fillStyle = p.c; ctx.beginPath();
+    ctx.arc(cc.x + cc.nx * cc.w * p.o, cc.y + cc.ny * cc.w * p.o, cc.w * p.r + 4 * S, 0, TAU); ctx.fill();
+  });
+  ctx.restore();
+  bodyPath(g); ctx.strokeStyle = 'rgba(20,10,5,.28)'; ctx.lineWidth = 1.2; ctx.stroke();
+  // eyes
+  var c1 = C[1]; ctx.fillStyle = '#1b1210';
+  [1, -1].forEach(function (s) {
+    ctx.beginPath(); ctx.arc(c1.x + c1.nx * c1.w * 0.62 * s, c1.y + c1.ny * c1.w * 0.62 * s, 2.4 * S, 0, TAU); ctx.fill();
+  });
+}
+
+/* ---------- snake ---------- */
+function drawSnake() {
+  paintBg(); drawRipples();
+  var g = bodyGeom(function (t) { return S * (13 * Math.min(1, 0.78 + t * 3) * Math.pow(1 - t, 0.55) + 0.5); }, 16);
+  var C = g.C, n = C.length, i, cc;
+  shadow(g);
+  bodyPath(g); ctx.fillStyle = '#3e9b7f'; ctx.fill();
+  ctx.save(); bodyPath(g); ctx.clip();
+  for (i = 1; i < n; i++) {
+    cc = C[i];
+    if (i % 2 === 0) {
+      ctx.fillStyle = 'rgba(18,64,58,.55)'; ctx.beginPath(); ctx.arc(cc.x, cc.y, cc.w * 0.9, 0, TAU); ctx.fill();
+    } else {
+      ctx.fillStyle = 'rgba(214,235,170,.55)';
+      [1, -1].forEach(function (s) {
+        ctx.beginPath(); ctx.arc(cc.x + cc.nx * cc.w * 0.75 * s, cc.y + cc.ny * cc.w * 0.75 * s, Math.max(1, cc.w * 0.28), 0, TAU); ctx.fill();
+      });
+    }
+  }
+  ctx.restore();
+  bodyPath(g); ctx.strokeStyle = 'rgba(8,30,28,.45)'; ctx.lineWidth = 1.2; ctx.stroke();
+  var c0 = C[0];
+  ctx.save();
+  ctx.translate(c0.x + Math.cos(c0.ang) * 5 * S, c0.y + Math.sin(c0.ang) * 5 * S);
+  ctx.rotate(c0.ang);
+  ctx.fillStyle = '#4aae8f'; ctx.beginPath(); ctx.ellipse(0, 0, 14 * S, 10 * S, 0, 0, TAU); ctx.fill();
+  [-1, 1].forEach(function (s) {
+    ctx.fillStyle = '#f3d96b'; ctx.beginPath(); ctx.arc(5 * S, s * 6 * S, 2.7 * S, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#1a1a14'; ctx.beginPath(); ctx.ellipse(5.3 * S, s * 6 * S, 0.8 * S, 2.2 * S, 0, 0, TAU); ctx.fill();
+  });
+  if (Math.sin(clock * 8) > 0.5) {
+    ctx.strokeStyle = '#e0455a'; ctx.lineWidth = 1.6; ctx.beginPath();
+    ctx.moveTo(13 * S, 0); ctx.lineTo(22 * S, 0); ctx.lineTo(26 * S, -3 * S);
+    ctx.moveTo(22 * S, 0); ctx.lineTo(26 * S, 3 * S); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/* ---------- hand cursor ---------- */
+function drawCursor() {
+  if (!tgt.has) return;
+  ctx.globalCompositeOperation = 'source-over';
+  if (mode === 'flee') {
+    ctx.save(); ctx.setLineDash([4, 8]); ctx.strokeStyle = 'rgba(255,138,76,.28)'; ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.arc(tgt.x, tgt.y, FLEE_R * S, 0, TAU); ctx.stroke(); ctx.restore();
+  }
+  ctx.strokeStyle = 'rgba(255,138,76,.95)'; ctx.lineWidth = 2.5;
+  ctx.beginPath(); ctx.arc(tgt.x, tgt.y, (18 + 3 * Math.sin(clock * 6)) * S, 0, TAU); ctx.stroke();
+  ctx.fillStyle = 'rgba(255,138,76,.9)';
+  ctx.beginPath(); ctx.arc(tgt.x, tgt.y, 4 * S, 0, TAU); ctx.fill();
+}
+
+/* ---------- controls ---------- */
+function setPressed(sel, active) {
+  Array.prototype.forEach.call(document.querySelectorAll(sel), function (b) {
+    b.setAttribute('aria-pressed', b === active ? 'true' : 'false');
+  });
+}
+Array.prototype.forEach.call(document.querySelectorAll('[data-kind]'), function (b) {
+  b.addEventListener('click', function () {
+    kind = b.getAttribute('data-kind');
+    setPressed('[data-kind]', b);
+    parts.length = 0; resetSpine(); paintBg();
+  });
+});
+Array.prototype.forEach.call(document.querySelectorAll('[data-mode]'), function (b) {
+  b.addEventListener('click', function () {
+    mode = b.getAttribute('data-mode');
+    setPressed('[data-mode]', b); fleeing = false; refreshStatus();
+  });
+});
+
+/* ---------- camera + hand tracking ---------- */
+var cam = 'off', camStream = null, hands = null, handVisible = false, camBusy = false;
+var camRaf = 0, gotResult = false, fails = 0, errMsg = '', loadingMsg = '';
+
+function refreshStatus() {
+  var t;
+  if (cam === 'loading') t = loadingMsg;
+  else if (cam === 'on') t = handVisible
+    ? (mode === 'follow' ? 'اليد ظاهرة، الكائن يتبعها' : 'اليد ظاهرة، الكائن يهرب منها')
+    : 'ارفع يدك أمام الكاميرا';
+  else if (cam === 'error') t = errMsg;
+  else t = 'المس الشاشة وحرّك إصبعك، أو شغّل الكاميرا لتتحكم بيدك';
+  statusEl.textContent = t;
+}
+function stopCam() {
+  cancelAnimationFrame(camRaf);
+  if (camStream) { camStream.getTracks().forEach(function (t) { t.stop(); }); camStream = null; }
+  video.srcObject = null; camBox.hidden = true;
+  try { if (hands) hands.close(); } catch (err) {}
+  hands = null; handVisible = false;
+  if (tgt.src === 'hand') tgt.has = false;
+  camBtn.textContent = 'شغّل الكاميرا';
+}
+function camFail(msg) {
+  if (cam === 'error') return;
+  stopCam(); cam = 'error'; errMsg = msg; refreshStatus();
+}
+function onResults(res) {
+  var first = !gotResult;
+  if (first) { gotResult = true; cam = 'on'; }
+  var lm = res.multiHandLandmarks && res.multiHandLandmarks[0];
+  var was = handVisible;
+  if (lm) {
+    var t = lm[8];
+    var m = function (v) { return Math.max(0, Math.min(1, (v - 0.5) * 1.3 + 0.5)); };
+    setTarget((1 - m(t.x)) * W, m(t.y) * floorY, 'hand');
+    handVisible = true;
+  } else handVisible = false;
+  if (first || was !== handVisible) refreshStatus();
+}
+function camLoop() {
+  if (!camStream || !hands) return;
+  if (!camBusy && video.readyState >= 2) {
+    camBusy = true;
+    hands.send({ image: video }).then(function () { fails = 0; }).catch(function () {
+      if (++fails >= 3 && !gotResult) camFail('تعذر تحميل نموذج اليد. افتح الملف مباشرة في المتصفح مع اتصال إنترنت.');
+    }).then(function () { camBusy = false; });
+  }
+  camRaf = requestAnimationFrame(camLoop);
+}
+async function startCam() {
+  if (cam === 'loading') return;
+  cam = 'loading'; loadingMsg = 'جارٍ تشغيل الكاميرا...'; refreshStatus();
+  camBtn.textContent = 'جارٍ التشغيل';
+  try {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('nocam');
+    camStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }, audio: false });
+  } catch (err) {
+    return camFail('الكاميرا غير متاحة في هذه الصفحة. تحكم بإصبعك الآن، أو افتح الملف في المتصفح للتحكم بيدك.');
+  }
+  if (!window.Hands) return camFail('تعذر تحميل مكتبة تتبع اليد. تأكد من اتصال الإنترنت.');
+  video.srcObject = camStream;
+  try { await video.play(); } catch (err) {}
+  camBox.hidden = false; camBtn.textContent = 'أوقف الكاميرا';
+  loadingMsg = 'جارٍ تحميل نموذج اليد...'; refreshStatus();
+  hands = new window.Hands({ locateFile: function (f) { return 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/' + f; } });
+  hands.setOptions({ maxNumHands: 1, modelComplexity: 0, minDetectionConfidence: 0.6, minTrackingConfidence: 0.5, selfieMode: false });
+  hands.onResults(onResults);
+  gotResult = false; fails = 0; camLoop();
+  setTimeout(function () {
+    if (cam === 'loading' && !gotResult) camFail('تعذر تحميل نموذج اليد. افتح الملف مباشرة في المتصفح مع اتصال إنترنت.');
+  }, 30000);
+}
+camBtn.addEventListener('click', function () {
+  if (cam === 'on' || (cam === 'loading' && camStream)) { stopCam(); cam = 'off'; refreshStatus(); }
+  else startCam();
+});
+
+/* ---------- start ---------- */
+window.addEventListener('resize', resize);
+if (window.ResizeObserver) new ResizeObserver(function () { if (H) measureFloor(); }).observe(panel);
+resize(); refreshStatus();
+var last = performance.now();
+function frame(t) {
+  var dt = Math.min(0.033, Math.max(0.001, (t - last) / 1000)); last = t;
+  update(dt);
+  if (kind === 'orb') drawOrb(dt); else if (kind === 'fish') drawFish(); else drawSnake();
+  drawCursor();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</body></html>
